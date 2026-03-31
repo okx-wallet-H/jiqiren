@@ -1,0 +1,22 @@
+{
+  "routes": [
+    {
+      "path": "/",
+      "src": "src/pages/Index.tsx"
+    }
+  ],
+  "components": [
+    { "name": "MobileHeader", "src": "src/components/MobileHeader.tsx" },
+    { "name": "TopBar", "src": "src/components/TopBar.tsx" },
+    { "name": "BottomNav", "src": "src/components/BottomNav.tsx" },
+    { "name": "CandleChart", "src": "src/components/CandleChart.tsx" },
+    { "name": "GridChart", "src": "src/components/GridChart.tsx" },
+    { "name": "GridTable", "src": "src/components/GridTable.tsx" },
+    { "name": "GridWaveChart", "src": "src/components/GridWaveChart.tsx" },
+    { "name": "ProfitChart", "src": "src/components/ProfitChart.tsx" },
+    { "name": "RecentTrades", "src": "src/components/RecentTrades.tsx" },
+    { "name": "StatCard", "src": "src/components/StatCard.tsx" },
+    { "name": "StrategyInfo", "src": "src/components/StrategyInfo.tsx" },
+    { "name": "UserRankItem", "src": "src/components/UserRankItem.tsx" }
+  ]
+}
