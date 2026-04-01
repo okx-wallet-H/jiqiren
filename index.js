@@ -26,7 +26,7 @@ fs.mkdirSync(OKX_CONFIG_DIR, { recursive: true });
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
 const db = new Database(DB_PATH);
-const client = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY, baseURL: process.env.OPENAI_BASE_URL || undefined }) : null;
+const client = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY, baseURL: process.env.AI_BASE_URL || undefined }) : null;
 const ENC_KEY = crypto
   .createHash('sha256')
   .update(String(process.env.BOT_ENCRYPTION_SECRET || 'dolphin-ai-default-secret'))
