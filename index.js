@@ -9,7 +9,7 @@ const OpenAI = require('openai');
 const { Telegraf, Markup } = require('telegraf');
 
 const HOME = process.env.HOME || '/home/ubuntu';
-const PROJECT_DIR = path.join(HOME, 'dolphin_ai');
+const PROJECT_DIR = process.env.RAILWAY_ENVIRONMENT ? process.cwd() : path.join(HOME, 'dolphin_ai');
 const DATA_DIR = path.join(PROJECT_DIR, 'data');
 const DB_PATH = path.join(DATA_DIR, 'users.db');
 const OKX_CONFIG_DIR = path.join(HOME, '.okx');
@@ -26,7 +26,7 @@ fs.mkdirSync(OKX_CONFIG_DIR, { recursive: true });
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
 const db = new Database(DB_PATH);
-const client = new OpenAI();
+const client = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY, baseURL: process.env.OPENAI_BASE_URL || undefined }) : null;
 const ENC_KEY = crypto
   .createHash('sha256')
   .update(String(process.env.BOT_ENCRYPTION_SECRET || 'dolphin-ai-default-secret'))
@@ -909,6 +909,23 @@ function calcGridRecommendation(snapshot) {
 }
 
 async function getOpenAiAiResult(snapshot) {
+    const gridBase = calcGridRecommendation(snapshot);
+    const rsi = Number(snapshot.rsi4h) || Number(snapshot.rsi1h) || 50;
+    const score = rsi > 70 ? 45 : rsi < 30 ? 75 : 60;
+    return {
+      score,
+      verdict: score >= 60 ? "买" : "观望",
+      conclusion: score >= 60 ? "技术指标偏多，可考虑轻仓" : "市场震荡，建议观望",
+      action: score >= 60 ? "轻仓买入" : "观望等待",
+      trend: inferTrend(snapshot),
+      rsi,
+      risk: "中等",
+      grid_upper: gridBase.grid_upper,
+      grid_lower: gridBase.grid_lower,
+      grid_num: gridBase.grid_num,
+      grid_invest: gridBase.grid_invest,
+    };
+  }
   const dailyPayload = snapshot.dailyCandles.map((row) => ({ ts: row.ts, o: row.open, h: row.high, l: row.low, c: row.close, v: row.volume }));
   const h4Payload = snapshot.h4Candles.map((row) => ({ ts: row.ts, o: row.open, h: row.high, l: row.low, c: row.close, v: row.volume }));
   const h1Payload = snapshot.h1Candles.map((row) => ({ ts: row.ts, o: row.open, h: row.high, l: row.low, c: row.close, v: row.volume }));
