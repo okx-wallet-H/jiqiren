@@ -1,0 +1,25 @@
+{
+  "variables": {
+    "TELEGRAM_TOKEN": {
+      "description": "Telegram Bot Token",
+      "required": true
+    },
+    "BOT_ENCRYPTION_SECRET": {
+      "description": "Bot encryption secret key",
+      "required": false,
+      "default": "dolphin-ai-default-secret"
+    },
+    "OPENAI_API_KEY": {
+      "description": "OpenAI or Deepseek API Key (optional)",
+      "required": false
+    },
+    "OPENAI_MODEL": {
+      "description": "AI model name (optional)",
+      "required": false
+    },
+    "AI_BASE_URL": {
+      "description": "AI API base URL (optional, e.g. https://api.deepseek.com/v1)",
+      "required": false
+    }
+  }
+}
