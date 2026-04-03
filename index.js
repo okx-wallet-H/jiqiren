@@ -9,7 +9,7 @@ const OpenAI = require('openai');
 const { Telegraf, Markup } = require('telegraf');
 
 const HOME = process.env.HOME || '/home/ubuntu';
-const PROJECT_DIR = process.env.RAILWAY_ENVIRONMENT ? process.cwd() : path.join(HOME, 'dolphin_ai');
+const PROJECT_DIR = process.env.RAILWAY_ENVIRONMENT ? process.cwd() : path.join(HOME, 'dolphin_bot');
 const DATA_DIR = path.join(PROJECT_DIR, 'data');
 const DB_PATH = path.join(DATA_DIR, 'users.db');
 const OKX_CONFIG_DIR = path.join(HOME, '.okx');
@@ -33,8 +33,8 @@ const ENC_KEY = crypto
   .digest();
 
 const MAIN_MENU = Markup.keyboard([
-  ["行情分析", "现货交易"],
-  ["合约杠杆", "网格策略"],
+  ["行情分析", "网格策略"],
+  ["绑定账户", "查询网格"],
 ]).resize();
 
 const BIND_MENU = Markup.inlineKeyboard([
@@ -43,22 +43,18 @@ const BIND_MENU = Markup.inlineKeyboard([
 
 function buildAiActionMenu(symbol) {
   return Markup.inlineKeyboard([
-    [
-      Markup.button.callback('现货买入', `ai_spot_${symbol}`),
-      Markup.button.callback('创建网格', `ai_grid_${symbol}`),
-    ],
+    [Markup.button.callback('启动网格策略', `ai_grid_${symbol}`)],
   ]);
 }
 
 const HELP_TEXT = [
   '可用功能：',
-  '1. 行情分析：直接发送“BTC怎么样”“OKB多少钱”“ETH现在如何”',
-  '2. 现货交易：发送“买 BTC 100U”或“卖 ETH 0.5”',
-  '3. 合约杠杆：发送“开多 BTC 100U 5倍”或“开空 ETH 2张 10倍”',
-  '4. 网格策略：发送“推荐 BTC”或“合约网格 BTC”或“BTC 60000 70000 10格 100U 现货”',
-  '5. 赚币理财：发送“查询”“申购 USDT 100”“赎回 USDT 50”',
-  '6. 账户余额：点击“账户余额”直接查看',
-  '7. 快捷命令：/market /trade /contract /grid',
+  '1. 行情分析：直接发送"BTC怎么样""OKB多少钱""ETH现在如何"',
+  '2. 网格策略：发送"推荐 BTC"或"合约网格 BTC"或"BTC 60000 70000 10格 100U"',
+  '3. 绑定账户：绑定您的 OKX API Key',
+  '4. 查询网格：查看当前运行中的网格订单',
+  '5. 赚币理财：发送"查询""申购 USDT 100""赎回 USDT 50"',
+  '6. 快捷命令：/market /grid',
 ].join('\n');
 
 const SYMBOL_ALIASES = {
@@ -309,7 +305,12 @@ function runCommand(command) {
   } catch (error) {
     const stderr = error.stderr ? String(error.stderr).trim() : '';
     const stdout = error.stdout ? String(error.stdout).trim() : '';
-    throw new Error(stderr || stdout || error.message || '命令执行失败');
+    const message = stderr || stdout || error.message || '命令执行失败';
+    const lowerMessage = message.toLowerCase();
+    if (message.includes('401') || message.includes('Authentication Fails') || lowerMessage.includes('invalid')) {
+      throw new Error('❌ API Key 无效或未绑定，请先使用 /bind 命令绑定您的 OKX API Key');
+    }
+    throw new Error(message);
   }
 }
 
@@ -323,7 +324,8 @@ function runOkx(args, options = {}) {
   }
   parts.push(...args);
   const command = parts.map(shQuote).join(' ');
-  const output = runCommand(command);
+  const finalCommand = options.profile ? command : `HOME=/tmp ${command}`;
+  const output = runCommand(finalCommand);
   if (options.json === false) return output;
   try {
     return JSON.parse(output || 'null');
@@ -458,6 +460,8 @@ async function createContractGridOrder(ctx, payload) {
       `格数：${payload.gridNum}`,
       `投入：${payload.sz} USDT`,
       `杠杆：${payload.lever}倍`,
+      `预计运行：${payload.estimatedDays ? `${payload.estimatedDays} 天` : '--'}`,
+      `止损建议：${payload.stopLossHint || '--'}`,
       `Algo ID：${row?.algoId || '--'}`,
       `状态：${row?.sCode === '0' ? '已创建' : row?.sMsg || '已返回'}`,
     ].join('\n'),
@@ -469,11 +473,44 @@ async function startGridConversation(ctx, presetSymbol = '') {
   const symbol = extractExplicitSymbol(presetSymbol);
   if (symbol) {
     if (!userHasKey(ctx.from.id)) return showBindPrompt(ctx);
-    setUserState(ctx.from.id, 'await_contract_grid_direction', {
-      symbol,
-      instId: makeInstId(symbol, true),
-    });
-    await ctx.reply(`已选择 ${symbol} 合约网格。\n请输入方向：做多 / 做空 / 中性`, MAIN_MENU);
+    const instId = makeInstId(symbol, true);
+    try {
+      const snapshot = buildAiMarketSnapshot(instId);
+      const recommendation = calcGridRecommendation(snapshot);
+      const fmt = (v) => Number(v || 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
+      setUserState(ctx.from.id, 'await_contract_grid_confirm', {
+        symbol,
+        instId,
+        maxPx: String(recommendation.grid_upper),
+        minPx: String(recommendation.grid_lower),
+        gridNum: String(recommendation.grid_num),
+        estimatedDays: recommendation.estimated_days,
+        stopLossHint: recommendation.stop_loss_hint,
+        recommendationReason: recommendation.reason,
+      });
+      await ctx.reply(
+        [
+          '━━━━━━━━━━━━━━━━━━',
+          `📊 ${symbol} 合约网格推荐`,
+          '━━━━━━━━━━━━━━━━━━',
+          `当前价格：${fmt(snapshot.price)} USDT`,
+          `推荐区间：${fmt(recommendation.grid_lower)} ~ ${fmt(recommendation.grid_upper)}`,
+          `推荐格数：${recommendation.grid_num} 格`,
+          `预计运行：${recommendation.estimated_days} 天`,
+          `止损建议：${recommendation.stop_loss_hint}`,
+          `推荐理由：${recommendation.reason}`,
+          '',
+          '请选择方向：',
+          '做多 / 做空 / 中性',
+          '',
+          '（如需修改区间，请输入：上限 下限 格数，例如：90000 78000 20）',
+        ].join('\n'),
+        MAIN_MENU,
+      );
+    } catch (error) {
+      clearUserState(ctx.from.id);
+      await ctx.reply(`获取 ${symbol} 行情失败：${error.message}`, MAIN_MENU);
+    }
     return;
   }
   setUserState(ctx.from.id, 'await_grid_mode', {});
@@ -482,70 +519,106 @@ async function startGridConversation(ctx, presetSymbol = '') {
 
 async function processContractGridWizard(ctx, text, state) {
   const payload = state.payload || {};
-
   if (state.state === 'await_contract_grid_symbol') {
     const symbol = extractExplicitSymbol(text);
     if (!symbol) {
       await ctx.reply('币种无法识别，请输入币种，例如：BTC', MAIN_MENU);
       return true;
     }
-    setUserState(ctx.from.id, 'await_contract_grid_direction', {
-      ...payload,
-      symbol,
-      instId: makeInstId(symbol, true),
-    });
-    await ctx.reply(`交易对已设为 ${makeInstId(symbol, true)}。\n请输入方向：做多 / 做空 / 中性`, MAIN_MENU);
+    const instId = makeInstId(symbol, true);
+    try {
+      const snapshot = buildAiMarketSnapshot(instId);
+      const recommendation = calcGridRecommendation(snapshot);
+      const fmt = (v) => Number(v || 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
+      setUserState(ctx.from.id, 'await_contract_grid_confirm', {
+        ...payload,
+        symbol,
+        instId,
+        maxPx: String(recommendation.grid_upper),
+        minPx: String(recommendation.grid_lower),
+        gridNum: String(recommendation.grid_num),
+        estimatedDays: recommendation.estimated_days,
+        stopLossHint: recommendation.stop_loss_hint,
+        recommendationReason: recommendation.reason,
+      });
+      await ctx.reply(
+        [
+          '━━━━━━━━━━━━━━━━━━',
+          `📊 ${symbol} 合约网格推荐`,
+          '━━━━━━━━━━━━━━━━━━',
+          `当前价格：${fmt(snapshot.price)} USDT`,
+          `推荐区间：${fmt(recommendation.grid_lower)} ~ ${fmt(recommendation.grid_upper)}`,
+          `推荐格数：${recommendation.grid_num} 格`,
+          `预计运行：${recommendation.estimated_days} 天`,
+          `止损建议：${recommendation.stop_loss_hint}`,
+          `推荐理由：${recommendation.reason}`,
+          '',
+          '请选择方向：',
+          '做多 / 做空 / 中性',
+          '',
+          '（如需修改区间，请输入：上限 下限 格数，例如：90000 78000 20）',
+        ].join('\n'),
+        MAIN_MENU,
+      );
+    } catch (error) {
+      await ctx.reply(`获取 ${symbol} 行情失败：${error.message}`, MAIN_MENU);
+    }
     return true;
   }
-
+  if (state.state === 'await_contract_grid_confirm') {
+    const direction = parseGridDirection(text);
+    if (direction) {
+      setUserState(ctx.from.id, 'await_contract_grid_sz', { ...payload, direction });
+      await ctx.reply('请输入投入金额，单位 USDT，例如：100', MAIN_MENU);
+      return true;
+    }
+    const customMatch = String(text || '').trim().match(/^(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+)$/);
+    if (customMatch) {
+      const maxPx = customMatch[1];
+      const minPx = customMatch[2];
+      const gridNum = parseInt(customMatch[3], 10);
+      if (!gridNum || gridNum < 2 || gridNum > 500) {
+        await ctx.reply('格数格式不正确，请输入 2 到 500 的整数。', MAIN_MENU);
+        return true;
+      }
+      if (Number(minPx) >= Number(maxPx)) {
+        await ctx.reply('下限价必须小于上限价，请重新输入。', MAIN_MENU);
+        return true;
+      }
+      const stopLossHint = `价格跌破 ${Number((Number(minPx) * 0.97).toFixed(2))} 或涨过 ${Number((Number(maxPx) * 1.03).toFixed(2))} 时建议停止`;
+      setUserState(ctx.from.id, 'await_contract_grid_direction', {
+        ...payload,
+        maxPx,
+        minPx,
+        gridNum: String(gridNum),
+        stopLossHint,
+      });
+      await ctx.reply(
+        [
+          '已更新网格参数：',
+          `上限：${maxPx}`,
+          `下限：${minPx}`,
+          `格数：${gridNum}`,
+          '',
+          '请输入方向：做多 / 做空 / 中性',
+        ].join('\n'),
+        MAIN_MENU,
+      );
+      return true;
+    }
+    await ctx.reply('请输入：做多 / 做空 / 中性；如需修改区间，请输入：上限 下限 格数，例如：90000 78000 20', MAIN_MENU);
+    return true;
+  }
   if (state.state === 'await_contract_grid_direction') {
     const direction = parseGridDirection(text);
     if (!direction) {
       await ctx.reply('方向无法识别，请输入：做多 / 做空 / 中性', MAIN_MENU);
       return true;
     }
-    setUserState(ctx.from.id, 'await_contract_grid_max_px', { ...payload, direction });
-    await ctx.reply('请输入上限价，例如：100000', MAIN_MENU);
-    return true;
-  }
-
-  if (state.state === 'await_contract_grid_max_px') {
-    const maxPx = parsePositiveNumberInput(text);
-    if (!maxPx) {
-      await ctx.reply('上限价格式不正确，请输入大于 0 的数字。', MAIN_MENU);
-      return true;
-    }
-    setUserState(ctx.from.id, 'await_contract_grid_min_px', { ...payload, maxPx });
-    await ctx.reply('请输入下限价，例如：80000', MAIN_MENU);
-    return true;
-  }
-
-  if (state.state === 'await_contract_grid_min_px') {
-    const minPx = parsePositiveNumberInput(text);
-    if (!minPx) {
-      await ctx.reply('下限价格式不正确，请输入大于 0 的数字。', MAIN_MENU);
-      return true;
-    }
-    if (Number(minPx) >= Number(payload.maxPx)) {
-      await ctx.reply('下限价必须小于上限价，请重新输入下限价。', MAIN_MENU);
-      return true;
-    }
-    setUserState(ctx.from.id, 'await_contract_grid_grid_num', { ...payload, minPx });
-    await ctx.reply('请输入格数，例如：10', MAIN_MENU);
-    return true;
-  }
-
-  if (state.state === 'await_contract_grid_grid_num') {
-    const gridNum = parsePositiveIntegerInput(text, 2, 500);
-    if (!gridNum) {
-      await ctx.reply('格数格式不正确，请输入 2 到 500 的整数。', MAIN_MENU);
-      return true;
-    }
-    setUserState(ctx.from.id, 'await_contract_grid_sz', { ...payload, gridNum });
+    setUserState(ctx.from.id, 'await_contract_grid_sz', { ...payload, direction });
     await ctx.reply('请输入投入金额，单位 USDT，例如：100', MAIN_MENU);
     return true;
   }
-
   if (state.state === 'await_contract_grid_sz') {
     const sz = parsePositiveNumberInput(text);
     if (!sz) {
@@ -556,7 +629,6 @@ async function processContractGridWizard(ctx, text, state) {
     await ctx.reply('请输入杠杆倍数，例如：3', MAIN_MENU);
     return true;
   }
-
   if (state.state === 'await_contract_grid_lever') {
     const lever = parsePositiveNumberInput(text);
     if (!lever) {
@@ -566,7 +638,6 @@ async function processContractGridWizard(ctx, text, state) {
     await createContractGridOrder(ctx, { ...payload, lever });
     return true;
   }
-
   return false;
 }
 
@@ -669,19 +740,29 @@ function bollinger(values, period = 20, multi = 2) {
   };
 }
 
-function getTicker(instId) {
-  const data = runOkx(['market', 'ticker', instId]);
-  return Array.isArray(data) ? data[0] : data;
+function httpGetSync(url) {
+  const result = execSync('curl -s --max-time 10 ' + shQuote(url), {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 15000,
+  }).trim();
+  return JSON.parse(result || 'null');
 }
 
-function getCandles(instId, bar = '1H', limit = 60) {
-  const data = runOkx(['market', 'candles', instId, '--bar', bar, '--limit', String(limit)]);
-  return Array.isArray(data) ? data : [];
+function getTicker(instId) {
+  const res = httpGetSync('https://www.okx.com/api/v5/market/ticker?instId=' + encodeURIComponent(instId));
+  return Array.isArray(res && res.data) ? res.data[0] : null;
+}
+
+function getCandles(instId, bar, limit) {
+  bar = bar || '1H'; limit = limit || 60;
+  const res = httpGetSync('https://www.okx.com/api/v5/market/candles?instId=' + encodeURIComponent(instId) + '&bar=' + encodeURIComponent(bar) + '&limit=' + limit);
+  return Array.isArray(res && res.data) ? res.data : [];
 }
 
 function getFundingRate(instId) {
-  const data = runOkx(['market', 'funding-rate', instId]);
-  return Array.isArray(data) ? data[0] : data;
+  const res = httpGetSync('https://www.okx.com/api/v5/public/funding-rate?instId=' + encodeURIComponent(instId));
+  return Array.isArray(res && res.data) ? res.data[0] : null;
 }
 
 function getIndicators(instId) {
@@ -888,44 +969,56 @@ function normalizeConclusion(value, score, trend) {
 }
 
 function calcGridRecommendation(snapshot) {
-  const upperBase = Number(snapshot?.dailyHigh);
-  const lowerBase = Number(snapshot?.dailyLow);
   const price = Number(snapshot?.price);
-  let upper = Number.isFinite(upperBase) ? upperBase : price * 1.08;
-  let lower = Number.isFinite(lowerBase) ? lowerBase : price * 0.92;
+  const atr = Number(snapshot?.atr);
+  const high30 = Number(snapshot?.dailyHigh);
+  const low30 = Number(snapshot?.dailyLow);
+  const rsiBase = Number(snapshot?.rsi4h ?? snapshot?.rsi1h);
+  const ma7 = Number(snapshot?.ma7);
+  const ma30 = Number(snapshot?.ma30);
+  const atrPct = price > 0 && Number.isFinite(atr) ? atr / price : 0.03;
+
+  let upper = price * (1 + atrPct * 2.5);
+  let lower = price * (1 - atrPct * 2.5);
+
+  if (Number.isFinite(high30)) upper = Math.min(upper, high30);
+  if (Number.isFinite(low30)) lower = Math.max(lower, low30);
+
   if (!Number.isFinite(upper) || !Number.isFinite(lower) || upper <= lower) {
-    upper = price * 1.08;
-    lower = price * 0.92;
+    upper = Number.isFinite(high30) ? high30 : price * 1.08;
+    lower = Number.isFinite(low30) ? low30 : price * 0.92;
   }
+
   const spanRatio = price > 0 ? (upper - lower) / price : 0;
-  const gridNum = spanRatio >= 0.25 ? 30 : spanRatio >= 0.12 ? 20 : 12;
+  const gridNum = spanRatio > 0.25 ? 30 : spanRatio >= 0.15 ? 20 : 12;
+  const isRange = Number.isFinite(rsiBase) ? rsiBase >= 40 && rsiBase <= 60 : true;
+  const trendBias = Number.isFinite(ma7) && Number.isFinite(ma30)
+    ? ma7 > ma30
+      ? '偏多'
+      : ma7 < ma30
+        ? '偏空'
+        : '中性'
+    : '中性';
+  const estimatedDays = isRange ? '14-21' : '7-10';
+  const stopLossLower = Number((lower * 0.97).toFixed(2));
+  const stopLossUpper = Number((upper * 1.03).toFixed(2));
+  const reason = isRange
+    ? `当前震荡行情，ATR ${(atrPct * 100).toFixed(2)}%，适合网格`
+    : `当前${trendBias}趋势较明显，ATR ${(atrPct * 100).toFixed(2)}%，建议按趋势缩短运行周期`;
   const gridInvest = price >= 50000 ? 500 : price >= 5000 ? 300 : 200;
+
   return {
     grid_upper: Number(upper.toFixed(2)),
     grid_lower: Number(lower.toFixed(2)),
     grid_num: gridNum,
     grid_invest: gridInvest,
+    estimated_days: estimatedDays,
+    stop_loss_hint: `价格跌破 ${stopLossLower} 或涨过 ${stopLossUpper} 时建议停止`,
+    reason,
   };
 }
 
 async function getOpenAiAiResult(snapshot) {
-    const gridBase = calcGridRecommendation(snapshot);
-    const rsi = Number(snapshot.rsi4h) || Number(snapshot.rsi1h) || 50;
-    const score = rsi > 70 ? 45 : rsi < 30 ? 75 : 60;
-    return {
-      score,
-      verdict: score >= 60 ? "买" : "观望",
-      conclusion: score >= 60 ? "技术指标偏多，可考虑轻仓" : "市场震荡，建议观望",
-      action: score >= 60 ? "轻仓买入" : "观望等待",
-      trend: inferTrend(snapshot),
-      rsi,
-      risk: "中等",
-      grid_upper: gridBase.grid_upper,
-      grid_lower: gridBase.grid_lower,
-      grid_num: gridBase.grid_num,
-      grid_invest: gridBase.grid_invest,
-    };
-  }
   const dailyPayload = snapshot.dailyCandles.map((row) => ({ ts: row.ts, o: row.open, h: row.high, l: row.low, c: row.close, v: row.volume }));
   const h4Payload = snapshot.h4Candles.map((row) => ({ ts: row.ts, o: row.open, h: row.high, l: row.low, c: row.close, v: row.volume }));
   const h1Payload = snapshot.h1Candles.map((row) => ({ ts: row.ts, o: row.open, h: row.high, l: row.low, c: row.close, v: row.volume }));
@@ -1108,7 +1201,13 @@ async function handleStart(ctx) {
     await ctx.replyWithPhoto({ source: WELCOME_IMAGE });
   }
   await ctx.reply(
-    '欢迎使用 Dolphin AI Bot。\n请选择功能，或直接发送“BTC怎么样”“OKB多少钱”“ETH现在如何”等自然语言指令。',
+    '欢迎使用 Dolphin AI Bot 🐬
+
+支持功能：
+• 行情分析：发送"BTC怎么样"
+• 网格策略：发送"推荐 BTC"或点击菜单
+• 绑定账户：绑定 OKX API Key
+• 查询网格：查看运行中的网格订单',
     MAIN_MENU,
   );
 }
@@ -1173,7 +1272,7 @@ async function handleAiEntry(ctx) {
 }
 
 async function handleMarketCommand(ctx) {
-  setUserState(ctx.from.id, 'await_ai_symbol', {});
+  setUserState(ctx.from.id, 'await_market_symbol', {});
   await ctx.reply('请输入币种，例如：BTC', MAIN_MENU);
 }
 
@@ -1482,18 +1581,43 @@ async function replyGridRecommendation(ctx, text) {
 
 bot.start(handleStart);
 bot.command('market', handleMarketCommand);
-bot.command('trade', handleTradeCommand);
-bot.command('contract', handleContractCommand);
 bot.command('grid', handleGridCommand);
+bot.command('bind', async (ctx) => {
+  await ctx.reply('━━━━━━━━━━━━━━━━━━\n请先绑定 OKX API Key\n━━━━━━━━━━━━━━━━━━', BIND_MENU);
+});
 
 bot.action('start_bind', handleBindingStart);
 bot.action(/^ai_spot_(.+)$/, async (ctx) => handleAiSpotFromCard(ctx, ctx.match[1]));
 bot.action(/^ai_grid_(.+)$/, async (ctx) => handleAiGridFromCard(ctx, ctx.match[1]));
 
 bot.hears('行情分析', handleMarketCommand);
-bot.hears('现货交易', handleSpotEntry);
-bot.hears('合约杠杆', handleSwapEntry);
 bot.hears('网格策略', handleGridEntry);
+bot.hears('绑定账户', async (ctx) => {
+  await ctx.reply('━━━━━━━━━━━━━━━━━━\n请先绑定 OKX API Key\n━━━━━━━━━━━━━━━━━━', BIND_MENU);
+});
+bot.hears('查询网格', async (ctx) => {
+  if (!userHasKey(ctx.from.id)) return showBindPrompt(ctx);
+  const profile = getUserProfile(ctx.from.id);
+  try {
+    const contractData = runOkx(['bot', 'grid', 'orders', '--algoOrdType', 'contract_grid'], { profile });
+    const spotData = runOkx(['bot', 'grid', 'orders', '--algoOrdType', 'grid'], { profile });
+    const contractList = Array.isArray(contractData) ? contractData.slice(0, 5) : [];
+    const spotList = Array.isArray(spotData) ? spotData.slice(0, 5) : [];
+    const lines = ['━━━━━━━━━━━━━━━━━━', '网格订单列表', '━━━━━━━━━━━━━━━━━━'];
+    if (contractList.length) {
+      lines.push('【合约网格】');
+      contractList.forEach(x => lines.push(`${x.instId} | ${x.algoId} | ${x.state || x.runningType || '--'}`));
+    }
+    if (spotList.length) {
+      lines.push('【现货网格】');
+      spotList.forEach(x => lines.push(`${x.instId} | ${x.algoId} | ${x.state || x.runningType || '--'}`));
+    }
+    if (!contractList.length && !spotList.length) lines.push('暂无运行中的网格订单');
+    await ctx.reply(lines.join('\n'), MAIN_MENU);
+  } catch (error) {
+    await ctx.reply(`查询失败：${error.message}`, MAIN_MENU);
+  }
+});
 
 bot.on('text', async (ctx) => {
   const text = String(ctx.message.text || '').trim();
@@ -1512,6 +1636,11 @@ bot.on('text', async (ctx) => {
       return;
     }
 
+    if (state?.state === 'await_market_symbol') {
+      await replyMarket(ctx, text);
+      return;
+    }
+
     if (state?.state === 'await_grid_recommend_symbol') {
       await replyGridRecommendation(ctx, text);
       return;
@@ -1527,7 +1656,7 @@ bot.on('text', async (ctx) => {
       return;
     }
 
-    await ctx.reply('未识别该指令，请点击菜单或发送“BTC怎么样”“ETH现在如何”“买 BTC 100U”。', MAIN_MENU);
+    await ctx.reply('未识别该指令，请点击菜单或发送"BTC怎么样""推荐 BTC"。', MAIN_MENU);
   } catch (error) {
     await ctx.reply(`执行失败：${error.message}`, MAIN_MENU);
   }
@@ -1545,10 +1674,10 @@ bot.catch(async (error, ctx) => {
 (async () => {
   const me = await bot.telegram.getMe();
   await bot.telegram.setMyCommands([
+    { command: 'start', description: '开始使用' },
     { command: 'market', description: '行情分析' },
-    { command: 'trade', description: '现货交易' },
-    { command: 'contract', description: '合约杠杆' },
     { command: 'grid', description: '网格策略' },
+    { command: 'bind', description: '绑定账户' },
   ]);
   await bot.launch();
   console.log(`Bot polling started: @${me.username} (${me.id})`);
