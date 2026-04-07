@@ -1683,5 +1683,32 @@ bot.catch(async (error, ctx) => {
   console.log(`Bot polling started: @${me.username} (${me.id})`);
 })();
 
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+let shutdownInProgress = false;
+
+function safeStopBot(signal) {
+  if (shutdownInProgress) {
+    console.log(`Skip duplicate shutdown signal: ${signal}`);
+    return;
+  }
+  shutdownInProgress = true;
+
+  try {
+    if (!bot.polling && !bot.webhookServer) {
+      console.log(`Skip bot.stop(${signal}): bot is not running`);
+      return;
+    }
+
+    bot.stop(signal);
+    console.log(`Bot stopped gracefully via ${signal}`);
+  } catch (error) {
+    if (error?.message?.includes('Bot is not running')) {
+      console.log(`Ignore bot.stop(${signal}) error: ${error.message}`);
+      return;
+    }
+
+    console.error(`bot.stop(${signal}) failed:`, error);
+  }
+}
+
+process.once('SIGINT', () => safeStopBot('SIGINT'));
+process.once('SIGTERM', () => safeStopBot('SIGTERM'));
